@@ -3,7 +3,6 @@ import javax.swing.border.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.awt.geom.*;
-import java.util.ArrayList;
 import java.util.Random;
 
 public class Main {
@@ -12,17 +11,27 @@ public class Main {
     static final Color C_BG      = new Color(0x08080F);
     static final Color C_CARD    = new Color(0x10101C);
     static final Color C_BORDER  = new Color(0x1E1E36);
-    static final Color C_ACCENT  = new Color(0x6EE7F7);
-    static final Color C_ACCENT2 = new Color(0xB06EF7);
-    static final Color C_SUCCESS = new Color(0x39D98A);
+    static final Color C_ACCENT  = new Color(0x6EE7F7);  // P1 Color
+    static final Color C_ACCENT2 = new Color(0xB06EF7);  // P2 Color
+    static final Color C_SUCCESS = new Color(0x39D98A);  // P3 / Success
     static final Color C_DANGER  = new Color(0xFF5572);
-    static final Color C_WARN    = new Color(0xFFB836);
+    static final Color C_WARN    = new Color(0xFFB836);  // P4 Color
     static final Color C_TEXT    = new Color(0xECECFF);
     static final Color C_MUTED   = new Color(0x52527A);
     static final Color C_DIM     = new Color(0x1A1A2E);
 
     // ── State ────────────────────────────────────────────────────────────────
-    private int targetNumber, attempts, maxAttempts = 5;
+    enum GameMode { SOLO, FRIEND_SETS, MULTIPLAYER }
+    private GameMode mode = GameMode.SOLO;
+    private int maxAttempts = 5;
+
+    // Multiplayer State
+    private int numPlayers = 1;
+    private int currentPlayerIndex = 0;
+    private int[] targets;
+    private int[] attemptsArr;
+    private boolean[] finished;
+
     private long startTime;
     private int bestScore = Integer.MAX_VALUE;
     private boolean gameOver = false;
@@ -34,7 +43,7 @@ public class Main {
     private FeedbackDisplay feedbackDisplay;
     private LivesBar livesBar;
     private HistoryList historyList;
-    private JLabel timerLbl, bestLbl;
+    private JLabel timerLbl, bestLbl, turnLbl;
     private Timer uiTimer;
     private int bgOffset = 0;
     private float glowPhase = 0f;
@@ -45,6 +54,7 @@ public class Main {
         chooseGameMode();
         buildUI();
         startTimers();
+        updateTurnLabel();
     }
 
     private void applyUIDefaults() {
@@ -69,9 +79,9 @@ public class Main {
         addDialogTitle(p, "SELECT DIFFICULTY");
 
         JRadioButton[] opts = {
-                radioBtn("EASY     — 10 attempts", false),
-                radioBtn("NORMAL   —  5 attempts", true),
-                radioBtn("HARD     —  3 attempts", false),
+                radioBtn("EASY     — 10 total attempts", false),
+                radioBtn("NORMAL   —  5 total attempts", true),
+                radioBtn("HARD     —  3 total attempts", false),
                 radioBtn("CUSTOM   —  set your own", false)
         };
         ButtonGroup bg = new ButtonGroup();
@@ -108,28 +118,78 @@ public class Main {
         p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
         addDialogTitle(p, "GAME MODE");
 
-        JRadioButton rand   = radioBtn("RANDOM   — computer picks (1–100)", true);
-        JRadioButton friend = radioBtn("VERSUS   — a friend sets the number", false);
-        ButtonGroup bg = new ButtonGroup(); bg.add(rand); bg.add(friend);
-        p.add(rand); p.add(vgap(4)); p.add(friend);
+        JRadioButton solo   = radioBtn("SOLO         — computer picks", true);
+        JRadioButton pass   = radioBtn("PASS         — a friend sets the number", false);
+        JRadioButton multi  = radioBtn("MULTIPLAYER  — race to guess each other's (2-8P)", false);
+        ButtonGroup bg = new ButtonGroup();
+        bg.add(solo); bg.add(pass); bg.add(multi);
+        p.add(solo); p.add(vgap(4)); p.add(pass); p.add(vgap(4)); p.add(multi);
 
         int r = JOptionPane.showConfirmDialog(null, p, "Number Guesser",
                 JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
         if (r != JOptionPane.OK_OPTION) System.exit(0);
 
-        if (friend.isSelected()) {
+        if (solo.isSelected()) {
+            mode = GameMode.SOLO;
+            numPlayers = 1;
+            targets = new int[]{ new Random().nextInt(100) + 1 };
+        }
+        else if (pass.isSelected()) {
+            mode = GameMode.FRIEND_SETS;
+            numPlayers = 1;
+            targets = new int[1];
             while (true) {
                 try {
                     String s = JOptionPane.showInputDialog(null,
-                            "Friend, enter a secret number (1–100):", "Number Guesser", JOptionPane.PLAIN_MESSAGE);
+                            "Friend, enter a secret number (1–100):", "Setup", JOptionPane.PLAIN_MESSAGE);
                     if (s == null) System.exit(0);
-                    targetNumber = Integer.parseInt(s.trim());
-                    if (targetNumber >= 1 && targetNumber <= 100) break;
+                    int val = Integer.parseInt(s.trim());
+                    if (val >= 1 && val <= 100) { targets[0] = val; break; }
                 } catch (Exception ignored) {}
             }
-        } else {
-            targetNumber = new Random().nextInt(100) + 1;
         }
+        else {
+            mode = GameMode.MULTIPLAYER;
+            String s = JOptionPane.showInputDialog(null, "How many players? (2 to 8):", "2");
+            if (s == null) System.exit(0);
+            try {
+                numPlayers = Math.max(2, Math.min(8, Integer.parseInt(s.trim())));
+            } catch(Exception e) { numPlayers = 2; }
+
+            targets = new int[numPlayers];
+            for (int i = 0; i < numPlayers; i++) {
+                int setter = i + 1;
+                int guesser = (i + 1) % numPlayers + 1;
+                while (true) {
+                    JPanel setupPanel = dialogPanel();
+                    setupPanel.setLayout(new BoxLayout(setupPanel, BoxLayout.Y_AXIS));
+                    addDialogTitle(setupPanel, "SECRET SETUP");
+                    JLabel lbl = new JLabel("Player " + setter + ", set number for Player " + guesser + ":");
+                    lbl.setFont(mono(13)); lbl.setForeground(C_TEXT);
+                    setupPanel.add(lbl); setupPanel.add(vgap(8));
+
+                    JPasswordField pf = new JPasswordField(10);
+                    pf.setFont(mono(16, true));
+                    pf.setBackground(C_DIM); pf.setForeground(C_TEXT); pf.setCaretColor(C_ACCENT);
+                    pf.setBorder(BorderFactory.createEmptyBorder(6,8,6,8));
+                    setupPanel.add(pf);
+
+                    int res = JOptionPane.showConfirmDialog(null, setupPanel, "Setup", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+                    if (res != JOptionPane.OK_OPTION) System.exit(0);
+                    try {
+                        int val = Integer.parseInt(new String(pf.getPassword()).trim());
+                        if (val >= 1 && val <= 100) {
+                            targets[guesser - 1] = val; // Target stored for the guesser
+                            break;
+                        }
+                    } catch(Exception ignored) {}
+                }
+            }
+        }
+
+        attemptsArr = new int[numPlayers];
+        finished = new boolean[numPlayers];
+        currentPlayerIndex = 0;
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -143,6 +203,7 @@ public class Main {
         contentPane = new JPanel(null) {
             @Override protected void paintComponent(Graphics g2) {
                 Graphics2D g = (Graphics2D) g2;
+                applyQualityRendering(g);
                 g.setColor(C_BG);
                 g.fillRect(0, 0, getWidth(), getHeight());
                 float phase = (bgOffset % 360) / 360f;
@@ -156,7 +217,6 @@ public class Main {
                         new float[]{0f, 1f},
                         new Color[]{new Color(176,110,247,18), new Color(0,0,0,0)});
                 g.setPaint(rg2); g.fillRect(0, 0, getWidth(), getHeight());
-                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
                 g.setColor(C_BORDER);
                 g.setStroke(new BasicStroke(1f));
                 g.drawRoundRect(0, 0, getWidth()-1, getHeight()-1, 20, 20);
@@ -199,10 +259,18 @@ public class Main {
         // ── Stats row
         timerLbl = statLabel("0s");
         timerLbl.setBounds(20, 52, 120, 22);
-        bestLbl = statLabel("");
+
+        turnLbl = new JLabel("");
+        turnLbl.setFont(mono(13, true));
+        turnLbl.setHorizontalAlignment(SwingConstants.CENTER);
+        turnLbl.setBounds(140, 52, 180, 22);
+
+        bestLbl = statLabel(mode == GameMode.MULTIPLAYER ? "VERSUS" : "");
         bestLbl.setHorizontalAlignment(SwingConstants.RIGHT);
         bestLbl.setBounds(320, 52, 120, 22);
+
         contentPane.add(timerLbl);
+        contentPane.add(turnLbl);
         contentPane.add(bestLbl);
 
         // ── Feedback
@@ -256,6 +324,34 @@ public class Main {
         uiTimer.start();
     }
 
+    static Color getPlayerColor(int p) {
+        switch (p) {
+            case 1: return C_ACCENT;                  // Cyan
+            case 2: return C_ACCENT2;                 // Purple
+            case 3: return C_SUCCESS;                 // Green
+            case 4: return C_WARN;                    // Orange/Yellow
+            case 5: return new Color(0xFF79C6);       // Pink
+            case 6: return new Color(0x8BE9FD);       // Light Blue
+            case 7: return new Color(0x50FA7B);       // Bright Lime
+            case 8: return new Color(0xFF5555);       // Red
+            default: return C_TEXT;
+        }
+    }
+
+    private void updateTurnLabel() {
+        if (mode == GameMode.MULTIPLAYER) {
+            int p = currentPlayerIndex + 1;
+            turnLbl.setText("PLAYER " + p + "'S TURN");
+            Color c = getPlayerColor(p);
+            turnLbl.setForeground(c);
+            numberInput.setCaretColor(c);
+        } else {
+            turnLbl.setText("");
+            numberInput.setCaretColor(C_ACCENT);
+        }
+        livesBar.setUsed(attemptsArr[currentPlayerIndex]);
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     private void checkGuess() {
         if (gameOver) return;
@@ -266,24 +362,44 @@ public class Main {
                 feedbackDisplay.set("1 to 100 only", C_WARN, "");
                 return;
             }
-            attempts++;
-            int cmp = Integer.compare(guess, targetNumber);
-            historyList.addEntry(attempts, guess, cmp);
-            livesBar.setUsed(attempts);
+
+            int pIdx = currentPlayerIndex;
+            attemptsArr[pIdx]++;
+            int cmp = Integer.compare(guess, targets[pIdx]);
+            historyList.addEntry(attemptsArr[pIdx], guess, cmp, mode == GameMode.MULTIPLAYER ? pIdx + 1 : 0);
 
             if (cmp == 0) {
-                feedbackDisplay.set("CORRECT!", C_SUCCESS, "You nailed it");
-                updateBest();
+                finished[pIdx] = true;
+                String winMsg = mode == GameMode.MULTIPLAYER ? "P" + (pIdx+1) + " WINS!" : "CORRECT!";
+                Color winCol = mode == GameMode.MULTIPLAYER ? getPlayerColor(pIdx+1) : C_SUCCESS;
+                feedbackDisplay.set(winMsg, winCol, "Nailed their secret number!");
+
+                if (mode != GameMode.MULTIPLAYER) updateBest();
+
+                // End game immediately when someone correctly guesses
                 gameOver = true; uiTimer.stop();
-                delay(900, () -> endGame(true));
-            } else if (attempts >= maxAttempts) {
-                feedbackDisplay.set("" + targetNumber, C_DANGER, "was the number");
-                gameOver = true; uiTimer.stop();
-                delay(1100, () -> endGame(false));
+                delay(1500, () -> endGame(true));
+
+            } else if (attemptsArr[pIdx] >= maxAttempts) {
+                finished[pIdx] = true;
+                if (allFinished()) {
+                    feedbackDisplay.set("GAME OVER", C_DANGER, mode == GameMode.MULTIPLAYER ? "Everyone lost!" : "Out of attempts!");
+                    gameOver = true; uiTimer.stop();
+                    delay(1200, () -> endGame(false));
+                } else {
+                    feedbackDisplay.set("ELIMINATED", C_DANGER, "P" + (pIdx+1) + " is out!");
+                    nextPlayer();
+                }
             } else {
-                feedbackDisplay.set(cmp < 0 ? "TOO LOW  ↑" : "TOO HIGH  ↓",
-                        cmp < 0 ? C_ACCENT : C_ACCENT2,
-                        (maxAttempts - attempts) + " attempts left");
+                Color c = mode == GameMode.MULTIPLAYER ? getPlayerColor(pIdx+1) : (cmp < 0 ? C_ACCENT : C_ACCENT2);
+                feedbackDisplay.set(cmp < 0 ? "TOO LOW  ↑" : "TOO HIGH  ↓", c,
+                        (maxAttempts - attemptsArr[pIdx]) + " attempts left");
+
+                if (mode == GameMode.MULTIPLAYER) {
+                    nextPlayer();
+                } else {
+                    livesBar.setUsed(attemptsArr[pIdx]);
+                }
             }
             numberInput.clear();
         } catch (NumberFormatException ex) {
@@ -291,18 +407,51 @@ public class Main {
         }
     }
 
+    private boolean allFinished() {
+        for (boolean b : finished) if (!b) return false;
+        return true;
+    }
+
+    private void nextPlayer() {
+        int start = currentPlayerIndex;
+        do {
+            currentPlayerIndex = (currentPlayerIndex + 1) % numPlayers;
+        } while (finished[currentPlayerIndex] && currentPlayerIndex != start);
+        updateTurnLabel();
+    }
+
     private void updateBest() {
-        if (attempts < bestScore) { bestScore = attempts; bestLbl.setText("BEST  " + bestScore); }
+        if (mode != GameMode.MULTIPLAYER && attemptsArr[0] < bestScore) {
+            bestScore = attemptsArr[0];
+            bestLbl.setText("BEST  " + bestScore);
+        }
     }
 
     private void endGame(boolean won) {
         long elapsed = (System.currentTimeMillis() - startTime) / 1000;
         JPanel p = dialogPanel();
         p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
-        addDialogTitle(p, won ? "✦  VICTORY" : "✗  GAME OVER");
-        String msg = won
-                ? "Guessed in " + attempts + " attempt" + (attempts==1?"":"s") + "  ·  " + elapsed + "s"
-                : "The number was " + targetNumber;
+
+        String title = won ? "✦  VICTORY" : "✗  GAME OVER";
+        if (won && mode == GameMode.MULTIPLAYER) title = "✦  PLAYER " + (currentPlayerIndex + 1) + " WINS";
+        addDialogTitle(p, title);
+
+        String msg;
+        if (won) {
+            msg = "Guessed in " + attemptsArr[currentPlayerIndex] + " attempt(s)  ·  " + elapsed + "s";
+        } else {
+            if (mode == GameMode.MULTIPLAYER) {
+                StringBuilder sb = new StringBuilder("<html>Targets were:<br>");
+                for (int i=0; i<numPlayers; i++) {
+                    sb.append("P").append(i+1).append(": ").append(targets[i]).append("<br>");
+                }
+                sb.append("</html>");
+                msg = sb.toString();
+            } else {
+                msg = "The number was " + targets[0];
+            }
+        }
+
         JLabel sub = new JLabel(msg);
         sub.setFont(mono(13)); sub.setForeground(C_MUTED);
         sub.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -330,8 +479,7 @@ public class Main {
         void tick(float p) { phase = p; }
         @Override protected void paintComponent(Graphics g2) {
             Graphics2D g = (Graphics2D) g2;
-            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+            applyQualityRendering(g);
             g.setColor(C_CARD);
             g.fill(new RoundRectangle2D.Float(0, 0, getWidth(), getHeight(), 18, 18));
             float alpha = (float)(0.35 + 0.25 * Math.sin(phase * Math.PI * 2));
@@ -360,7 +508,7 @@ public class Main {
         void setUsed(int u) { used = u; repaint(); }
         @Override protected void paintComponent(Graphics g2) {
             Graphics2D g = (Graphics2D) g2;
-            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            applyQualityRendering(g);
             int n = Math.min(total, 20);
             float segW = (getWidth() - (n-1)*4f) / n;
             for (int i = 0; i < n; i++) {
@@ -405,9 +553,10 @@ public class Main {
         String getText()  { return field.getText(); }
         void clear()      { field.setText(""); field.requestFocus(); }
         void focus()      { field.requestFocus(); }
+        void setCaretColor(Color c) { field.setCaretColor(c); }
         @Override protected void paintComponent(Graphics g2) {
             Graphics2D g = (Graphics2D) g2;
-            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            applyQualityRendering(g);
             g.setColor(C_CARD);
             g.fill(new RoundRectangle2D.Float(0, 0, getWidth(), getHeight(), 16, 16));
             g.setColor(C_BORDER); g.setStroke(new BasicStroke(1.5f));
@@ -430,7 +579,7 @@ public class Main {
         }
         @Override protected void paintComponent(Graphics g2) {
             Graphics2D g = (Graphics2D) g2;
-            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            applyQualityRendering(g);
             Color a = hover ? new Color(0x8CF0FF) : C_ACCENT;
             Color b = hover ? new Color(0xC48AFF) : C_ACCENT2;
             g.setPaint(new GradientPaint(0, 0, a, getWidth(), 0, b));
@@ -468,21 +617,27 @@ public class Main {
             super.setBounds(x,y,w,h);
             if (scroll != null) scroll.setBounds(0,0,w,h);
         }
-        void addEntry(int attempt, int guess, int cmp) {
+        void addEntry(int attempt, int guess, int cmp, int player) {
             JPanel row = new JPanel(new BorderLayout(8,0)) {
                 @Override protected void paintComponent(Graphics g) {
                     super.paintComponent(g);
-                    g.setColor(C_BORDER);
-                    g.drawLine(0,getHeight()-1,getWidth(),getHeight()-1);
+                    Graphics2D g2 = (Graphics2D)g;
+                    applyQualityRendering(g2);
+                    g2.setColor(C_BORDER);
+                    g2.drawLine(0,getHeight()-1,getWidth(),getHeight()-1);
                 }
             };
             row.setBackground(C_CARD);
             row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
             row.setBorder(BorderFactory.createEmptyBorder(6,0,6,0));
 
-            JLabel numLbl = new JLabel("#"+attempt+"   "+String.format("%3d",guess));
+            String prefix = player > 0 ? "P" + player : "#" + attempt;
+            JLabel numLbl = new JLabel(prefix + "   " + String.format("%3d",guess));
             numLbl.setFont(mono(13,true));
-            numLbl.setForeground(cmp==0 ? C_SUCCESS : C_TEXT);
+
+            if (cmp == 0) numLbl.setForeground(C_SUCCESS);
+            else if (player > 0) numLbl.setForeground(getPlayerColor(player));
+            else numLbl.setForeground(C_TEXT);
 
             String hint = cmp==0 ? "✓  correct" : cmp<0 ? "↑  too low" : "↓  too high";
             Color hcol  = cmp==0 ? C_SUCCESS    : cmp<0 ? C_ACCENT     : C_ACCENT2;
@@ -501,6 +656,16 @@ public class Main {
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
+
+    // Centralized rendering hints for maximum visual sharpness
+    static void applyQualityRendering(Graphics2D g) {
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_LCD_HRGB);
+        g.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, RenderingHints.VALUE_FRACTIONALMETRICS_ON);
+        g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_NORMALIZE);
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+    }
+
     static Font mono(int s)          { return new Font("Monospaced", Font.PLAIN, s); }
     static Font mono(int s, boolean b){ return new Font("Monospaced", b?Font.BOLD:Font.PLAIN, s); }
 
@@ -541,7 +706,7 @@ public class Main {
             });}
             @Override protected void paintComponent(Graphics g2) {
                 Graphics2D g=(Graphics2D)g2;
-                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,RenderingHints.VALUE_ANTIALIAS_ON);
+                applyQualityRendering(g);
                 if(h){ g.setColor(new Color(color.getRed(),color.getGreen(),color.getBlue(),40));
                     g.fillOval(0,0,getWidth(),getHeight()); }
                 g.setColor(h?color:C_MUTED); g.setFont(getFont());
@@ -571,6 +736,11 @@ public class Main {
     }
 
     public static void main(String[] args) {
+        // System properties for maximum visual sharpness on modern displays
+        System.setProperty("sun.java2d.dpiaware", "true");
+        System.setProperty("awt.useSystemAAFontSettings", "lcd");
+        System.setProperty("swing.aatext", "true");
+
         SwingUtilities.invokeLater(Main::new);
     }
 }
